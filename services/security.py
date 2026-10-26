@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from database import get_db

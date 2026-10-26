@@ -224,22 +224,39 @@ def process_history_task(
 
     except Exception as exc:
         raise self.retry(exc=exc)
+
+
+from services.content_dedup import mark_indexed, release
 from services.email_processing import extract_from_email
-from services.ingest import ingest_record
+from services.ingest import index_record_to_pinecone
 
 def _index_email(
     message: dict,
     gmail=None,
 ) -> None:
-    """Shared tail end: extract -> store document metadata + 384-d vector in Postgres."""
+    """Shared tail end: extract -> store metadata + vectors in Postgres and Pinecone."""
     records = extract_from_email(message, gmail=gmail)
     if not records:
         print(f"[Dedup/Filter] Email {message.get('id')} rejected, processed, or empty. Skipping.")
         return
 
     for record in records:
-        ingest_record(record)
+        fingerprints = record.pop("_content_fingerprints", [])
+        doc_id = record.get("doc_id", "")
+
+        # Email goes straight to Pinecone: the chunk text and every field retrieval
+        # needs live in vector metadata, so no PostgreSQL row is written for mail.
+        indexed = index_record_to_pinecone(record)
         print(
-            f"[Postgres] Stored document '{record.get('source')}' "
-            f"(doc_id: {record.get('doc_id')})."
+            f"[Pinecone] Indexed document '{record.get('source')}' "
+            f"(doc_id: {doc_id}, indexed: {indexed})."
         )
+
+        for kind, fingerprint in fingerprints:
+            if indexed:
+                mark_indexed(kind, fingerprint, doc_id)
+            else:
+                # Nothing reached Pinecone, so drop the claim: the next mailbox that
+                # receives this notice can retry it instead of being skipped forever
+                # by a claim that never completed.
+                release(kind, fingerprint)

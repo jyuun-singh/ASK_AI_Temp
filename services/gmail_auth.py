@@ -90,6 +90,72 @@ def exchange_code_for_tokens(
     return creds
 
 
+def configured_accounts() -> list[str]:
+    """
+    Every mailbox this deployment ingests from.
+
+    Driven by GMAIL_ACCOUNT_IDS (comma separated) so adding a mailbox is a config
+    change. Falls back to whichever mailboxes already have stored credentials.
+    """
+    raw = os.getenv("GMAIL_ACCOUNT_IDS", "")
+    accounts: list[str] = []
+    for entry in raw.split(","):
+        email = entry.strip()
+        if email and email not in accounts:
+            accounts.append(email)
+
+    if accounts:
+        return accounts
+
+    token_dir = os.path.dirname(TOKEN_STORE_PATH.format(user_id="placeholder"))
+    if not token_dir or not os.path.isdir(token_dir):
+        return []
+
+    return sorted(
+        filename[: -len(".json")]
+        for filename in os.listdir(token_dir)
+        if filename.endswith(".json")
+    )
+
+
+def register_watch(user_email: str, topic_name: str | None = None) -> dict:
+    """
+    Register or renew the Gmail Pub/Sub watch for one mailbox.
+
+    Gmail watches expire after 7 days; an expired watch means new mail silently
+    stops being ingested, so this is called on a schedule for every mailbox.
+    """
+    from googleapiclient.discovery import build
+
+    topic = topic_name or os.getenv("GCP_PUBSUB_TOPIC")
+    if not topic:
+        raise ValueError("No Pub/Sub topic configured (GCP_PUBSUB_TOPIC).")
+    if not topic.startswith("projects/") or "/topics/" not in topic:
+        raise ValueError(
+            "Invalid topic format. Must be: projects/PROJECT_ID/topics/TOPIC_NAME"
+        )
+
+    gmail = build("gmail", "v1", credentials=get_valid_credentials(user_email))
+    response = (
+        gmail.users()
+        .watch(userId="me", body={"topicName": topic, "labelIds": ["INBOX"]})
+        .execute()
+    )
+
+    history_id = response.get("historyId")
+    if history_id:
+        from services.history_state import set_last_history_id
+
+        set_last_history_id(user_email, history_id)
+
+    return {
+        "user_email": user_email,
+        "topic_name": topic,
+        "history_id": history_id,
+        "expiration_ms": response.get("expiration"),
+    }
+
+
 def get_valid_credentials(user_id: str) -> Credentials:
     """
     Sub-Step C: Retrieve working credentials for background processing.

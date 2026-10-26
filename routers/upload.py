@@ -35,12 +35,7 @@ async def upload_file(file: UploadFile):
     doc_id = str(uuid.uuid4())
 
     record = {
-        # text is intentionally empty — the raw file is kept on disk at
-        # attachment_path. postgres content stays empty for uploads/attachments.
-        "text": "",
-        # embed_text is extracted here so the 384-dim HNSW vector is meaningful
-        # even though the content column is empty. At query time the file is
-        # loaded from attachment_path and chunked for Pinecone.
+        "text": text,
         "embed_text": text,
         "doc_id": doc_id,
         "access_level": classify_access_level(text),

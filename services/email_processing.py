@@ -16,7 +16,6 @@ Pipeline per email:
 """
 
 import base64
-import hashlib
 import os
 import tempfile
 from html.parser import HTMLParser
@@ -34,6 +33,14 @@ from services.ocr_cache import (
 from services.dedup import (
     is_already_processed,
     mark_processed,
+)
+from services.content_dedup import (
+    ATTACHMENT,
+    ATTACHMENT_TEXT,
+    BODY,
+    attachment_fingerprint,
+    body_fingerprint,
+    claim,
 )
 from services.storage import save_file
 from services.sender_filter import is_allowed_sender
@@ -66,6 +73,13 @@ def _extract_headers(message: dict) -> dict:
         "sender": header_map.get("from", ""),
         "subject": header_map.get("subject", "No Subject"),
         "date": header_map.get("date", ""),
+        # Which mailbox received this message. Without it a broadcast that reaches
+        # many inboxes cannot be traced back to its origins.
+        "mailbox": (
+            header_map.get("delivered-to")
+            or header_map.get("x-original-to")
+            or header_map.get("to", "")
+        ),
     }
 
 
@@ -102,14 +116,31 @@ def extract_from_email(
     body_text = _extract_body(message)
 
     if body_text.strip():
-        records.append(
-            _build_record(
+        # The identical broadcast arrives in every mailbox, so fingerprint the
+        # normalized body and embed it only the first time it is seen.
+        body_hash = body_fingerprint(body_text)
+        body_is_new, body_prior = claim(
+            BODY,
+            body_hash,
+            mailbox=email_meta.get("mailbox", ""),
+            message_id=message_id,
+        )
+
+        if body_is_new:
+            body_record = _build_record(
                 body_text,
                 source="body",
                 doc_id=message_id,
                 meta=email_meta,
             )
-        )
+            body_record["_content_fingerprints"] = [(BODY, body_hash)]
+            records.append(body_record)
+        else:
+            body_prior = body_prior or {}
+            print(
+                f"[ContentDedup] Body of {message_id} already indexed as doc "
+                f"'{body_prior.get('doc_id') or 'unknown'}'; skipping embed."
+            )
 
     for attachment in _get_attachments(
         message,
@@ -260,12 +291,37 @@ def _process_single_attachment(
         else ""
     )
 
-    # 1. Persist the raw attachment file to permanent storage folder immediately.
+    mailbox = (meta or {}).get("mailbox", "")
+
+    # 1. Fingerprint the raw bytes BEFORE writing to disk, running OCR and
+    #    embedding. The same attachment reaches every mailbox, so only the first
+    #    copy is ever saved, extracted and embedded.
+    byte_hash = attachment_fingerprint(raw_bytes)
+    bytes_is_new, bytes_prior = claim(
+        ATTACHMENT,
+        byte_hash,
+        mailbox=mailbox,
+        message_id=message_id,
+        filename=filename,
+    )
+
+    if not bytes_is_new:
+        bytes_prior = bytes_prior or {}
+        print(
+            f"[ContentDedup] {filename}: identical attachment bytes already indexed as "
+            f"doc '{bytes_prior.get('doc_id') or 'unknown'}' (first seen in "
+            f"{bytes_prior.get('first_mailbox') or 'unknown mailbox'}); "
+            "skipping save/extract/embed."
+        )
+        return None
+
+    # 2. Persist the raw attachment file to permanent storage folder once.
     saved_path = save_file(raw_bytes, filename)
     print(f"[Attachment] Saved {filename} to {saved_path}")
 
-    # 2. Check OCR cache or extract text
-    content_hash = hashlib.sha256(raw_bytes).hexdigest()
+    # 3. Check OCR cache or extract text. The OCR cache is keyed by the same
+    #    content hash used for the ledger, so both agree on what "this attachment" is.
+    content_hash = byte_hash
     cached_text = get_cached_ocr_result(content_hash)
 
     if cached_text is not None:
@@ -284,14 +340,38 @@ def _process_single_attachment(
             print(f"[Attachment] Extraction error for {filename}: {exc}")
             return None
 
-    # 3. Build attachment record matching manual uploads
-    return _build_attachment_record(
+    # 4. Second gate: the same document re-published with different file bytes
+    #    (re-saved PDF, renamed copy) still extracts to the same text.
+    text_hash = body_fingerprint(extracted_text)
+    text_is_new, text_prior = claim(
+        ATTACHMENT_TEXT,
+        text_hash,
+        mailbox=mailbox,
+        message_id=message_id,
+        filename=filename,
+    )
+
+    if not text_is_new:
+        text_prior = text_prior or {}
+        print(
+            f"[ContentDedup] {filename}: identical text already indexed as doc "
+            f"'{text_prior.get('doc_id') or 'unknown'}'; skipping embed."
+        )
+        return None
+
+    # 5. Build attachment record matching manual uploads
+    record = _build_attachment_record(
         extracted_text=extracted_text,
         filename=filename,
         doc_id=f"{message_id}:{filename}",
         saved_path=saved_path,
         meta=meta,
     )
+    record["_content_fingerprints"] = [
+        (ATTACHMENT, byte_hash),
+        (ATTACHMENT_TEXT, text_hash),
+    ]
+    return record
 
 
 def _extract_body(message: dict) -> str:

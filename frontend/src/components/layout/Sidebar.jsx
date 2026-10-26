@@ -10,6 +10,7 @@ import {
   LogOut,
   LogIn,
   CheckCircle,
+  ShieldAlert,
   X,
 } from 'lucide-react';
 
@@ -142,6 +143,15 @@ export default function Sidebar({
 
         {/* Nav Items */}
         <nav className="nav-links">
+          {/* A real page, not a panel: a full navigation, so the grievance router takes over. */}
+          <a
+            href="/grievance"
+            className="nav-item"
+            onClick={() => onCloseMobile?.()}
+          >
+            <ShieldAlert className="w-4 h-4" />
+            Grievance
+          </a>
           <a
             href="#history"
             className={`nav-item ${activeItem === 'history' ? 'active' : ''}`}

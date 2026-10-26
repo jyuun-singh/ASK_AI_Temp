@@ -17,6 +17,23 @@ import {
   deleteChatSession,
 } from './services/chatHistoryService';
 import { Sparkles, MessageSquare, Menu, Plus } from 'lucide-react';
+import { GrievanceApp } from './grievance';
+import { ReportProblemButton } from './integration/ReportProblemButton';
+import './grievanceHost.css';
+
+/**
+ * The student's own words that produced an answer. "Report this as a problem" sends these
+ * to the grievance form, not the assistant's reply.
+ */
+function questionBefore(messages, index) {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'user') return messages[i].content;
+  }
+  return '';
+}
+
+const isGrievancePath = () =>
+  typeof window !== 'undefined' && window.location.pathname.startsWith('/grievance');
 
 function ChatApp() {
   const [messages, setMessages] = useState([]);
@@ -327,7 +344,7 @@ function ChatApp() {
 
             {/* Messages Scroll Area */}
             <div className="flex-1 overflow-y-auto pr-1 py-4 space-y-5">
-              {messages.map((msg) => (
+              {messages.map((msg, index) => (
                 <div
                   key={msg.id}
                   className={`flex gap-3 w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'
@@ -380,6 +397,13 @@ function ChatApp() {
                         </ReactMarkdown>
                       )}
                     </div>
+
+                    {/* A broken AC or a leaking tap needs somebody to act, not another answer. */}
+                    {msg.role === 'assistant' && !msg.isError && (
+                      <div className="mt-3 border-t border-white/10 pt-3">
+                        <ReportProblemButton text={questionBefore(messages, index)} />
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -416,6 +440,17 @@ function ChatApp() {
 }
 
 export default function App() {
+  // The grievance screens are a full page with their own frame and router, so the chat
+  // shell steps aside for them instead of nesting two navigation bars.
+  const grievanceMode = isGrievancePath();
+
+  useEffect(() => {
+    document.body.classList.toggle('grievance-mode', grievanceMode);
+    return () => document.body.classList.remove('grievance-mode');
+  }, [grievanceMode]);
+
+  if (grievanceMode) return <GrievanceApp />;
+
   return (
     <AuthProvider>
       <ChatApp />
